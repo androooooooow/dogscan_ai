@@ -31,34 +31,50 @@ const DogScanner = ({ user, setUser }) => {
       
       if (response.ok) {
         const data = await response.json();
-        const bothModelsLoaded = data.breed_model_loaded && data.disease_model_loaded;
+        const breedModelLoaded = data.breed_model_loaded;
+        const diseaseModelLoaded = data.disease_model_loaded;
+        const emotionModelLoaded = data.emotion_model_loaded;
         const dbConnected = data.database_connected;
         
-        // Store model information
         setModelInfo({
           diseaseModelType: data.disease_model_type || 'standard',
           diseaseInputSize: data.disease_input_size || 224,
           numBreeds: data.num_breeds || 0,
+          numEmotions: data.num_emotions || 0,
           numDiseases: data.num_diseases || 0,
+          breedModelLoaded: breedModelLoaded,
+          emotionModelLoaded: emotionModelLoaded,
+          diseaseModelLoaded: diseaseModelLoaded,
           kerasVersion: data.keras_version || 'unknown',
           tfVersion: data.tensorflow_version || 'unknown'
         });
         
         console.log('📊 Backend Health Check:', {
-          breedModel: data.breed_model_loaded ? '✅' : '❌',
-          diseaseModel: data.disease_model_loaded ? '✅' : '❌',
+          breedModel: breedModelLoaded ? '✅' : '❌',
+          emotionModel: emotionModelLoaded ? '✅' : '❌',
+          diseaseModel: diseaseModelLoaded ? '✅' : '❌',
           modelType: data.disease_model_type,
           database: dbConnected ? '✅' : '❌',
           diseases: data.num_diseases
         });
         
-        if (bothModelsLoaded && dbConnected) {
+        // Check if current mode's model is loaded
+        let currentModeOk = true;
+        if (scanMode === 'breed' && !breedModelLoaded) {
+          currentModeOk = false;
+          setError('Breed detection model not loaded. Please check backend logs.');
+        } else if (scanMode === 'emotion' && !emotionModelLoaded) {
+          currentModeOk = false;
+          setError('Emotion detection model not loaded. Please train the model first.');
+        } else if (scanMode === 'disease' && !diseaseModelLoaded) {
+          currentModeOk = false;
+          setError('Disease detection model not loaded. Please train the model first using: python train_dog_skin_disease.py');
+        }
+        
+        if (currentModeOk && dbConnected) {
           setBackendStatus('connected');
-        } else if (bothModelsLoaded && !dbConnected) {
+        } else if (currentModeOk && !dbConnected) {
           setBackendStatus('no-db');
-        } else if (!data.disease_model_loaded && scanMode === 'disease') {
-          setBackendStatus('disease-model-missing');
-          setError('Disease detection model not loaded. Please check backend logs.');
         } else {
           setBackendStatus('model-error');
         }
@@ -114,47 +130,108 @@ const DogScanner = ({ user, setUser }) => {
     setLoading(true);
     setError(null);
 
-    const formData = new FormData();
-    formData.append('image', selectedImage);
-    
-    // Add user info to form data from authenticated user
-    if (user && user.email) {
-      formData.append('user_email', user.email);
-      if (user.id) {
-        formData.append('user_id', user.id);
-      }
-    }
-
     try {
-      const endpoint = scanMode === 'breed' ? '/predict/breed' : '/predict/disease';
-      console.log(`🔮 Sending request to: ${API_URL}${endpoint}`);
-      
-      const response = await fetch(`${API_URL}${endpoint}`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      const data = await response.json();
-      console.log('📥 Response:', data);
-
-      if (response.ok && data.success) {
-        setPredictions(data);
+      if (scanMode === 'breed') {
+        // Call BOTH breed and emotion endpoints
+        console.log('🔮 Sending requests for breed + emotion detection...');
         
-        // Show success message if saved to database
-        if (data.scan_id) {
-          console.log(`✅ Scan saved to database with ID: ${data.scan_id}`);
-        }
-      } else {
-        // Enhanced error handling
-        let errorMessage = data.error || 'Prediction failed. Please try again.';
-        
-        // Check for specific error patterns
-        if (data.training_instructions) {
-          errorMessage = `${errorMessage}\n\nℹ️ Model Training Required:\n${data.training_instructions.message}`;
+        // Create FormData for breed request
+        const breedFormData = new FormData();
+        breedFormData.append('image', selectedImage);
+        if (user && user.email) {
+          breedFormData.append('user_email', user.email);
+          if (user.id) {
+            breedFormData.append('user_id', user.id);
+          }
         }
         
-        setError(errorMessage);
-        console.error('❌ Prediction error:', data);
+        // Call breed endpoint
+        const breedResponse = await fetch(`${API_URL}/predict/breed`, {
+          method: 'POST',
+          body: breedFormData,
+        });
+        const breedData = await breedResponse.json();
+        
+        // Call emotion endpoint (if model is loaded)
+        let emotionData = null;
+        if (modelInfo?.emotionModelLoaded) {
+          const emotionFormData = new FormData();
+          emotionFormData.append('image', selectedImage);
+          if (user && user.email) {
+            emotionFormData.append('user_email', user.email);
+            if (user.id) {
+              emotionFormData.append('user_id', user.id);
+            }
+          }
+          
+          try {
+            const emotionResponse = await fetch(`${API_URL}/predict/emotion`, {
+              method: 'POST',
+              body: emotionFormData,
+            });
+            emotionData = await emotionResponse.json();
+            console.log('📥 Emotion Response:', emotionData);
+          } catch (emotionErr) {
+            console.warn('⚠️ Emotion detection failed:', emotionErr);
+          }
+        }
+        
+        // Combine results
+        if (breedResponse.ok && breedData.success) {
+          const combinedData = {
+            ...breedData,
+            breed_predictions: breedData.predictions,
+            emotion: emotionData && emotionData.success ? {
+              emotion: emotionData.top_emotion,
+              confidence: emotionData.top_confidence,
+              all_probabilities: emotionData.predictions ? 
+                Object.fromEntries(
+                  emotionData.predictions.map(p => [p.emotion, p.confidence])
+                ) : {},
+              scan_id: emotionData.scan_id
+            } : { emotion: 'unavailable' }
+          };
+          
+          setPredictions(combinedData);
+          console.log('✅ Combined breed + emotion results:', combinedData);
+        } else {
+          let errorMessage = breedData.error || 'Breed prediction failed. Please try again.';
+          setError(errorMessage);
+          console.error('❌ Breed prediction error:', breedData);
+        }
+        
+      } else if (scanMode === 'disease') {
+        // Create FormData for disease request
+        const formData = new FormData();
+        formData.append('image', selectedImage);
+        if (user && user.email) {
+          formData.append('user_email', user.email);
+          if (user.id) {
+            formData.append('user_id', user.id);
+          }
+        }
+        
+        console.log(`🔮 Sending request to: ${API_URL}/predict/disease`);
+        
+        const response = await fetch(`${API_URL}/predict/disease`, {
+          method: 'POST',
+          body: formData,
+        });
+
+        const data = await response.json();
+        console.log('📥 Disease Detection Response:', data);
+
+        if (response.ok && data.success) {
+          setPredictions(data);
+          
+          if (data.scan_id) {
+            console.log(`✅ Scan saved to database with ID: ${data.scan_id}`);
+          }
+        } else {
+          let errorMessage = data.error || 'Prediction failed. Please try again.';
+          setError(errorMessage);
+          console.error('❌ Prediction error:', data);
+        }
       }
     } catch (err) {
       console.error('❌ API Error:', err);
@@ -179,7 +256,6 @@ const DogScanner = ({ user, setUser }) => {
     setScanMode(mode);
     setPredictions(null);
     setError(null);
-    // Recheck backend when switching modes
     checkBackendConnection();
   };
 
@@ -192,60 +268,111 @@ const DogScanner = ({ user, setUser }) => {
     return 'text-yellow-600';
   };
 
+  const getEmotionEmoji = (emotion) => {
+    const emotionMap = {
+      'happy': '😊',
+      'sad': '😢',
+      'angry': '😠',
+      'relaxed': '😌',
+      'neutral': '😐',
+      'fearful': '😰',
+      'surprised': '😲'
+    };
+    return emotionMap[emotion?.toLowerCase()] || '🐕';
+  };
+
   const getModelBadge = () => {
-    if (!modelInfo || scanMode !== 'disease') return null;
-    
-    const modelType = modelInfo.diseaseModelType;
-    const isAdvanced = modelType === 'advanced';
-    const isImproved = modelType === 'improved';
-    
-    return (
-      <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold ${
-        isAdvanced
-          ? 'bg-gradient-to-r from-blue-500 to-indigo-600 text-white'
-          : isImproved 
-            ? 'bg-gradient-to-r from-green-500 to-emerald-600 text-white'
-            : 'bg-gray-200 text-gray-700'
-      }`}>
-        {isAdvanced ? (
-          <>
-            <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
-            <span>ADVANCED MODEL • EfficientNetB3 • 90%+ Accuracy</span>
-            <span className="text-[10px] bg-white/20 px-2 py-0.5 rounded">
-              {modelInfo.diseaseInputSize}×{modelInfo.diseaseInputSize}
-            </span>
-          </>
-        ) : isImproved ? (
-          <>
-            <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
-            <span>IMPROVED MODEL • 80-90% Accuracy</span>
-            <span className="text-[10px] bg-white/20 px-2 py-0.5 rounded">
-              {modelInfo.diseaseInputSize}×{modelInfo.diseaseInputSize}
-            </span>
-          </>
-        ) : (
-          <>
+    if (scanMode === 'disease' && modelInfo) {
+      const modelType = modelInfo.diseaseModelType;
+      const isMobileNetV2H5 = modelType === 'mobilenetv2_h5';
+      const isMobileNetV2Final = modelType === 'mobilenetv2_final';
+      const isMobileNetV2Checkpoint = modelType === 'mobilenetv2_checkpoint';
+      const isMobileNetV2V1 = modelType === 'mobilenetv2_v1';
+      const isEfficientNetB3 = modelType === 'efficientnet_b3_final' || modelType === 'efficientnet_b3_checkpoint';
+      const isEfficientNetV1 = modelType === 'efficientnet_v1';
+      
+      return (
+        <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold ${
+          isMobileNetV2H5 || isMobileNetV2Final || isMobileNetV2Checkpoint
+            ? 'bg-gradient-to-r from-purple-500 to-indigo-600 text-white'
+            : isMobileNetV2V1
+              ? 'bg-gradient-to-r from-purple-400 to-indigo-500 text-white'
+              : isEfficientNetB3
+                ? 'bg-gradient-to-r from-blue-500 to-indigo-600 text-white'
+                : isEfficientNetV1
+                  ? 'bg-gradient-to-r from-emerald-500 to-teal-600 text-white'
+                  : 'bg-gray-200 text-gray-700'
+        }`}>
+          {isMobileNetV2H5 ? (
+            <>
+              <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
+              <span>MOBILENETV2 H5 • Transfer Learning • 224x224</span>
+            </>
+          ) : isMobileNetV2Final ? (
+            <>
+              <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
+              <span>MOBILENETV2 FINAL • Transfer Learning • 224x224</span>
+            </>
+          ) : isMobileNetV2Checkpoint ? (
+            <>
+              <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
+              <span>MOBILENETV2 CHECKPOINT • Best Model • 224x224</span>
+            </>
+          ) : isMobileNetV2V1 ? (
+            <>
+              <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
+              <span>MOBILENETV2 V1 • Custom Trained • 224x224</span>
+            </>
+          ) : isEfficientNetB3 ? (
+            <>
+              <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
+              <span>EFFICIENTNET B3 • 90%+ Accuracy • 224x224</span>
+            </>
+          ) : isEfficientNetV1 ? (
+            <>
+              <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
+              <span>EFFICIENTNET V1 • Custom Trained • 224x224</span>
+            </>
+          ) : (
             <span>STANDARD MODEL</span>
-            <span className="text-[10px] bg-gray-300 px-2 py-0.5 rounded">
-              {modelInfo.diseaseInputSize}×{modelInfo.diseaseInputSize}
-            </span>
-          </>
-        )}
-      </div>
-    );
+          )}
+        </div>
+      );
+    }
+    
+    if (scanMode === 'breed' && modelInfo?.emotionModelLoaded) {
+      return (
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-gradient-to-r from-purple-500 to-pink-600 text-white">
+          <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
+          <span>BREED + EMOTION AI • MobileNetV2</span>
+        </div>
+      );
+    }
+    
+    return null;
   };
 
   const getBackendStatusDisplay = () => {
     switch (backendStatus) {
       case 'checking':
-        return (
-          <span className="text-gray-600">Checking backend...</span>
-        );
+        return <span className="text-gray-600">Checking backend...</span>;
       case 'connected':
         return (
           <>
             <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
             <span className="text-green-600">Backend & Database Connected</span>
+            {modelInfo?.diseaseModelType && scanMode === 'disease' && (
+              <span className="text-purple-600 font-semibold">
+                • {modelInfo.diseaseModelType === 'mobilenetv2_h5' ? 'MobileNetV2 H5' :
+                   modelInfo.diseaseModelType === 'mobilenetv2_final' ? 'MobileNetV2 Final' : 
+                   modelInfo.diseaseModelType === 'mobilenetv2_checkpoint' ? 'MobileNetV2 Checkpoint' :
+                   modelInfo.diseaseModelType === 'mobilenetv2_v1' ? 'MobileNetV2 V1' :
+                   modelInfo.diseaseModelType.toUpperCase()} Active
+              </span>
+            )}
+            {modelInfo?.emotionModelLoaded && scanMode === 'breed' && (
+              <span className="text-green-600 font-semibold">• Emotion Detection Active</span>
+            )}
           </>
         );
       case 'no-db':
@@ -262,23 +389,55 @@ const DogScanner = ({ user, setUser }) => {
             <span className="text-red-600">Backend Offline</span>
           </>
         );
-      case 'disease-model-missing':
-        return (
-          <>
-            <span className="w-2 h-2 bg-orange-400 rounded-full animate-pulse"></span>
-            <span className="text-orange-600">Disease Model Not Loaded</span>
-          </>
-        );
       case 'model-error':
         return (
           <>
-            <span className="w-2 h-2 bg-yellow-400 rounded-full"></span>
-            <span className="text-yellow-600">Model Loading Error</span>
+            <span className="w-2 h-2 bg-orange-400 rounded-full animate-pulse"></span>
+            <span className="text-orange-600">Model Not Loaded - Run: python train_dog_skin_disease.py</span>
           </>
         );
       default:
         return null;
     }
+  };
+
+  const getPageTitle = () => {
+    switch (scanMode) {
+      case 'breed':
+        return 'Breed & Emotion Detection';
+      case 'disease':
+        return 'Skin Disease Detection';
+      default:
+        return 'Dog AI Scanner';
+    }
+  };
+
+  const getPageDescription = () => {
+    switch (scanMode) {
+      case 'breed':
+        return 'Identify breed and detect emotion in one scan';
+      case 'disease':
+        return modelInfo?.diseaseModelType === 'mobilenetv2_h5' 
+          ? 'Detect skin diseases using your custom-trained MobileNetV2 H5 AI with Transfer Learning'
+          : modelInfo?.diseaseModelType === 'mobilenetv2_final' 
+            ? 'Detect skin diseases using your custom-trained MobileNetV2 AI with Transfer Learning'
+            : modelInfo?.diseaseModelType === 'mobilenetv2_checkpoint'
+              ? 'Detect skin diseases using MobileNetV2 checkpoint model'
+              : modelInfo?.diseaseModelType === 'mobilenetv2_v1'
+                ? 'Detect skin diseases using MobileNetV2 V1 model'
+                : 'Detect skin diseases using AI';
+      default:
+        return 'Advanced AI-powered dog analysis';
+    }
+  };
+
+  const getUrgencyColor = (urgency) => {
+    if (!urgency) return 'text-gray-600';
+    const lower = urgency.toLowerCase();
+    if (lower.includes('immediate') || lower.includes('urgent')) return 'text-red-600';
+    if (lower.includes('moderate')) return 'text-orange-600';
+    if (lower.includes('low') || lower.includes('routine')) return 'text-green-600';
+    return 'text-gray-600';
   };
 
   return (
@@ -299,16 +458,14 @@ const DogScanner = ({ user, setUser }) => {
 
         <main className="flex-1 overflow-auto bg-white py-12 px-4">
           <div className="max-w-4xl mx-auto">
-            {/* Header */}
             <div className="text-center mb-10">
               <h1 className="text-3xl font-bold text-gray-800 mb-3">
-                🐕 Dog AI Scanner
+                🐕 {getPageTitle()}
               </h1>
               <p className="text-lg text-gray-700 mb-6">
-                Upload a photo to identify breed or detect skin diseases using AI
+                {getPageDescription()}
               </p>
 
-              {/* Mode Toggle */}
               <div className="inline-flex bg-gray-100 rounded-xl p-1 mb-4">
                 <button
                   onClick={() => switchMode('breed')}
@@ -318,7 +475,7 @@ const DogScanner = ({ user, setUser }) => {
                       : 'text-gray-600 hover:text-gray-800'
                   }`}
                 >
-                  🐶 Breed Scanner
+                  🐶 Breed ID
                 </button>
                 <button
                   onClick={() => switchMode('disease')}
@@ -328,33 +485,21 @@ const DogScanner = ({ user, setUser }) => {
                       : 'text-gray-600 hover:text-gray-800'
                   }`}
                 >
-                  🏥 Disease Detector
+                  🏥 Disease
                 </button>
               </div>
 
-              {/* Model Badge - Show for disease mode */}
               <div className="mb-3">
                 {getModelBadge()}
               </div>
 
-              {/* Backend Status Indicator */}
               <div className="flex items-center justify-center gap-2 text-sm">
                 {getBackendStatusDisplay()}
               </div>
-
-              {/* Model Info Debug (only in development) */}
-              {modelInfo && process.env.NODE_ENV === 'development' && (
-                <div className="mt-2 text-xs text-gray-500">
-                  Keras: {modelInfo.kerasVersion} | TF: {modelInfo.tfVersion} | 
-                  Diseases: {modelInfo.numDiseases}
-                </div>
-              )}
             </div>
 
-            {/* Main Card */}
             <div className="bg-white rounded-3xl shadow-2xl p-8 md:p-12">
               {!previewUrl ? (
-                /* Upload Area */
                 <div
                   onClick={() => fileInputRef.current?.click()}
                   onDrop={handleDrop}
@@ -364,7 +509,7 @@ const DogScanner = ({ user, setUser }) => {
                     border-4 border-dashed rounded-2xl p-16 text-center cursor-pointer
                     transition-all duration-300 ease-in-out
                     ${isDragging 
-                      ? 'border-purple-600 bg-purple-50 scale-105' 
+                      ? 'border-purple-600 bg-purple-50 scale-105'
                       : 'border-purple-300 bg-purple-50/50 hover:border-purple-500 hover:bg-purple-50'
                     }
                   `}
@@ -377,32 +522,25 @@ const DogScanner = ({ user, setUser }) => {
                   </div>
                   <div className="text-gray-500">
                     {scanMode === 'breed' 
-                      ? 'Upload a photo of a dog to identify its breed'
+                      ? 'Upload a photo of a dog to identify breed & detect emotion'
                       : 'Upload a photo of dog skin to detect potential diseases'
                     }
                   </div>
                   <div className="text-gray-400 text-sm mt-2">
                     Supports JPG, JPEG, PNG
                   </div>
-                  {scanMode === 'disease' && modelInfo && (modelInfo.diseaseModelType === 'improved' || modelInfo.diseaseModelType === 'advanced') && (
-                    <div className={`mt-4 ${
-                      modelInfo.diseaseModelType === 'advanced'
-                        ? 'bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200'
-                        : 'bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200'
-                    } rounded-lg p-3`}>
-                      <p className={`${
-                        modelInfo.diseaseModelType === 'advanced' ? 'text-blue-800' : 'text-green-800'
-                      } text-sm font-semibold`}>
-                        🎯 Using {modelInfo.diseaseModelType === 'advanced' ? 'Advanced' : 'Improved'} AI Model
-                      </p>
-                      <p className={`${
-                        modelInfo.diseaseModelType === 'advanced' ? 'text-blue-700' : 'text-green-700'
-                      } text-xs mt-1`}>
-                        Expected accuracy: {modelInfo.diseaseModelType === 'advanced' ? '90%+' : '80-90%'} • 
-                        High-resolution analysis ({modelInfo.diseaseInputSize}×{modelInfo.diseaseInputSize})
+                  
+                  {scanMode === 'disease' && modelInfo?.diseaseModelType && (
+                    <div className="mt-4 inline-block bg-purple-50 border border-purple-200 rounded-lg px-4 py-2">
+                      <p className="text-purple-700 text-sm font-medium">
+                        ✨ {modelInfo.diseaseModelType === 'mobilenetv2_final' ? 'Using your custom-trained MobileNetV2 model with Transfer Learning' :
+                           modelInfo.diseaseModelType === 'mobilenetv2_checkpoint' ? 'Using MobileNetV2 checkpoint model' :
+                           modelInfo.diseaseModelType === 'mobilenetv2_v1' ? 'Using MobileNetV2 V1 model' :
+                           'Using disease detection model'}
                       </p>
                     </div>
                   )}
+                  
                   {user && user.email && (
                     <div className="text-green-600 text-sm mt-3 font-medium">
                       ✓ Scan will be saved to your history
@@ -417,73 +555,47 @@ const DogScanner = ({ user, setUser }) => {
                   />
                 </div>
               ) : (
-                /* Preview Section */
                 <div className="space-y-6">
-                  {/* Image Preview */}
                   <div className="relative">
                     <img
                       src={previewUrl}
                       alt="Preview"
                       className="w-full max-h-96 object-contain rounded-2xl shadow-lg"
                     />
-                    {scanMode === 'disease' && modelInfo && (modelInfo.diseaseModelType === 'improved' || modelInfo.diseaseModelType === 'advanced') && (
-                      <div className={`absolute top-3 right-3 ${
-                        modelInfo.diseaseModelType === 'advanced'
-                          ? 'bg-gradient-to-r from-blue-500 to-indigo-600'
-                          : 'bg-gradient-to-r from-green-500 to-emerald-600'
-                      } text-white px-3 py-1 rounded-full text-xs font-semibold shadow-lg`}>
-                        🎯 {modelInfo.diseaseModelType === 'advanced' ? 'ADVANCED' : 'IMPROVED'} MODEL
-                      </div>
-                    )}
                   </div>
 
-                  {/* Analyze Button */}
                   {!predictions && !loading && (
                     <button
                       onClick={analyzeDog}
-                      disabled={backendStatus === 'offline' || backendStatus === 'model-error' || backendStatus === 'disease-model-missing'}
+                      disabled={backendStatus === 'offline' || backendStatus === 'model-error'}
                       className={`w-full py-4 px-8 rounded-xl text-xl font-semibold
                                shadow-lg transition-all duration-200
-                               ${(backendStatus === 'connected' || backendStatus === 'no-db') && 
-                                 (scanMode === 'breed' || (scanMode === 'disease' && backendStatus !== 'disease-model-missing'))
+                               ${(backendStatus === 'connected' || backendStatus === 'no-db')
                                  ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white hover:from-purple-700 hover:to-indigo-700 hover:scale-105 hover:shadow-xl'
                                  : 'bg-gray-300 text-gray-500 cursor-not-allowed'
                                }`}
                     >
-                      {backendStatus === 'disease-model-missing' && scanMode === 'disease'
-                        ? '⚠️ Disease Model Not Loaded'
-                        : (backendStatus === 'connected' || backendStatus === 'no-db')
-                          ? (scanMode === 'breed' ? '🔍 Analyze Dog Breed' : '🔬 Detect Skin Disease')
-                          : '⚠️ Backend Not Connected'
+                      {scanMode === 'breed' 
+                        ? '🔍 Analyze Breed & Emotion'
+                        : '🔬 Detect Skin Disease'
                       }
                     </button>
                   )}
 
-                  {/* Loading State */}
                   {loading && (
                     <div className="text-center py-12">
                       <div className="inline-block w-16 h-16 border-4 border-purple-200 border-t-purple-600 rounded-full animate-spin mb-4"></div>
                       <p className="text-xl text-purple-600 font-medium">
                         {scanMode === 'breed' 
-                          ? 'Analyzing dog breed...'
-                          : 'Analyzing skin condition...'
+                          ? 'Analyzing breed & detecting emotion...'
+                          : modelInfo?.diseaseModelType === 'mobilenetv2_final'
+                            ? 'Analyzing with your custom MobileNetV2...'
+                            : 'Analyzing skin condition...'
                         }
                       </p>
-                      <p className="text-sm text-gray-500 mt-2">
-                        {scanMode === 'disease' && modelInfo && (modelInfo.diseaseModelType === 'improved' || modelInfo.diseaseModelType === 'advanced')
-                          ? `Processing with ${modelInfo.diseaseModelType} AI model (${modelInfo.diseaseInputSize}×${modelInfo.diseaseInputSize})...`
-                          : 'Processing with AI model...'
-                        }
-                      </p>
-                      {user && user.email && (
-                        <p className="text-xs text-green-600 mt-2">
-                          Results will be saved to your history
-                        </p>
-                      )}
                     </div>
                   )}
 
-                  {/* Error Message */}
                   {error && (
                     <div className="bg-red-500 text-white p-5 rounded-xl shadow-lg">
                       <p className="font-semibold mb-2">❌ Error</p>
@@ -507,8 +619,7 @@ const DogScanner = ({ user, setUser }) => {
 
                   {/* Breed Results */}
                   {predictions && scanMode === 'breed' && predictions.predictions && (
-                    <div className="space-y-4">
-                      {/* Save confirmation */}
+                    <div className="space-y-6">
                       {predictions.scan_id && (
                         <div className="bg-green-50 border-2 border-green-200 rounded-xl p-3 text-center">
                           <p className="text-sm text-green-800 font-medium">
@@ -517,73 +628,140 @@ const DogScanner = ({ user, setUser }) => {
                         </div>
                       )}
 
-                      <h2 className="text-xl font-bold text-gray-800 text-center mb-6">
-                        🐕 Breed Predictions
-                      </h2>
+                      <div className="bg-gradient-to-br from-purple-50 to-indigo-50 rounded-2xl p-6 border border-purple-100">
+                        <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                          🐕 Breed Identification
+                        </h2>
 
-                      {predictions.predictions.map((pred, index) => (
-                        <div
-                          key={index}
-                          className={`
-                            p-5 rounded-xl transition-all duration-300
-                            ${index === 0
-                              ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-lg transform hover:scale-102'
-                              : 'bg-purple-50 hover:bg-purple-100 hover:translate-x-2'
-                            }
-                          `}
-                        >
-                          <div className="flex justify-between items-center">
-                            <span className={`font-semibold ${index === 0 ? 'text-lg' : 'text-md'}`}>
-                              {index === 0 && '👑 '}
-                              {pred.breed}
-                            </span>
-                            <span className={`font-bold ${index === 0 ? 'text-lg' : 'text-md'}`}>
-                              {pred.confidence.toFixed(2)}%
-                            </span>
+                        {predictions.predictions.map((pred, index) => (
+                          <div
+                            key={index}
+                            className={`
+                              p-4 rounded-xl mb-3 transition-all duration-300
+                              ${index === 0
+                                ? 'bg-gradient-to-r from-purple-500 to-indigo-600 text-white shadow-md'
+                                : 'bg-white text-gray-800 border border-gray-100'
+                              }
+                            `}
+                          >
+                            <div className="flex justify-between items-center">
+                              <span className={`font-semibold ${index === 0 ? 'text-base flex items-center gap-2' : 'text-sm'}`}>
+                                {index === 0 && '👑'} {pred.breed}
+                              </span>
+                              <span className={`font-bold ${index === 0 ? 'text-base' : 'text-sm'}`}>
+                                {pred.confidence.toFixed(1)}%
+                              </span>
+                            </div>
                           </div>
-                          
-                          {index === 0 && (
-                            <div className="mt-3 bg-white/30 rounded-full h-2 overflow-hidden">
-                              <div
-                                className="bg-white h-full rounded-full transition-all duration-500"
-                                style={{ width: `${pred.confidence}%` }}
-                              ></div>
+                        ))}
+                      </div>
+
+                      {/* EMOTION SECTION */}
+                      {predictions.emotion && predictions.emotion.emotion !== 'unavailable' && (
+                        <div className="bg-gradient-to-br from-purple-50 to-indigo-50 rounded-2xl p-6 border border-purple-100">
+                          <h2 className="text-base font-bold mb-4 flex items-center gap-2 text-gray-800">
+                            😊 Emotion Detected
+                          </h2>
+
+                          <div className="mb-6">
+                            <div className="flex justify-between items-center mb-2">
+                              <div>
+                                <p className="text-4xl font-bold capitalize text-gray-800">
+                                  {predictions.emotion.emotion}
+                                </p>
+                                <p className="text-xs text-gray-600 mt-1">
+                                  Primary emotion detected
+                                </p>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-4xl font-bold text-gray-800">
+                                  {predictions.emotion.confidence.toFixed(1)}%
+                                </p>
+                                <p className="text-xs text-gray-500">confidence</p>
+                              </div>
+                            </div>
+                          </div>
+
+                          {predictions.emotion.all_probabilities && (
+                            <div className="space-y-2 mb-5">
+                              {Object.entries(predictions.emotion.all_probabilities)
+                                .sort((a, b) => b[1] - a[1])
+                                .map(([emotion, prob]) => (
+                                  <div key={emotion}>
+                                    <div className="flex justify-between text-sm mb-1">
+                                      <span className="capitalize font-medium flex items-center gap-1.5 text-gray-700">
+                                        {getEmotionEmoji(emotion)} {emotion}
+                                      </span>
+                                      <span className="font-bold text-sm text-gray-800">{prob.toFixed(1)}%</span>
+                                    </div>
+                                    <div className="bg-purple-100 rounded-full h-1.5 overflow-hidden">
+                                      <div
+                                        className="bg-gradient-to-r from-purple-500 to-indigo-600 h-full rounded-full transition-all duration-500"
+                                        style={{ width: `${prob}%` }}
+                                      ></div>
+                                    </div>
+                                  </div>
+                                ))}
                             </div>
                           )}
+
+                          <div className="bg-purple-100 rounded-lg p-3 text-xs leading-relaxed">
+                            <p className="text-gray-700">
+                              💡 <strong>Tip:</strong> Your dog's emotional state can vary based on many factors including 
+                              environment, health, and recent activities. This is an AI analysis for entertainment and 
+                              general awareness.
+                            </p>
+                          </div>
                         </div>
-                      ))}
+                      )}
                     </div>
                   )}
 
-                  {/* Disease Results */}
+                  {/* Disease Results - UPDATED FOR MOBILENETV2 */}
                   {predictions && scanMode === 'disease' && predictions.top_prediction && (
                     <div className="space-y-6">
-                      {/* Model Info Badge in Results */}
                       {predictions.model_info && (
                         <div className={`text-center p-3 rounded-xl ${
-                          predictions.model_info.type === 'advanced'
-                            ? 'bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200'
-                            : predictions.model_info.type === 'improved'
-                              ? 'bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-200'
-                              : 'bg-gray-50 border-2 border-gray-200'
+                          predictions.model_info.type === 'mobilenetv2_h5'
+                            ? 'bg-gradient-to-r from-purple-50 to-indigo-50 border-2 border-purple-300'
+                            : predictions.model_info.type === 'mobilenetv2_final'
+                              ? 'bg-gradient-to-r from-purple-50 to-indigo-50 border-2 border-purple-300'
+                              : predictions.model_info.type === 'mobilenetv2_checkpoint'
+                                ? 'bg-gradient-to-r from-purple-50 to-blue-50 border-2 border-purple-200'
+                                : predictions.model_info.type === 'mobilenetv2_v1'
+                                  ? 'bg-gradient-to-r from-purple-50 to-indigo-50 border-2 border-purple-200'
+                                  : predictions.model_info.type === 'efficientnet_b3_final'
+                                    ? 'bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-300'
+                                    : 'bg-gray-50 border-2 border-gray-200'
                         }`}>
                           <p className={`text-sm font-semibold ${
-                            predictions.model_info.type === 'advanced'
-                              ? 'text-blue-800'
-                              : predictions.model_info.type === 'improved' 
-                                ? 'text-green-800' 
-                                : 'text-gray-700'
+                            predictions.model_info.type === 'mobilenetv2_h5'
+                              ? 'text-purple-800'
+                              : predictions.model_info.type === 'mobilenetv2_final'
+                                ? 'text-purple-800'
+                                : predictions.model_info.type === 'mobilenetv2_checkpoint'
+                                  ? 'text-purple-700'
+                                  : predictions.model_info.type === 'mobilenetv2_v1'
+                                    ? 'text-purple-700'
+                                    : predictions.model_info.type === 'efficientnet_b3_final'
+                                      ? 'text-blue-800'
+                                      : 'text-gray-700'
                           }`}>
-                            {predictions.model_info.type === 'advanced' ? '🎯' : predictions.model_info.type === 'improved' ? '🎯' : '📊'} 
-                            {' '}Analyzed with {predictions.model_info.type.toUpperCase()} model
-                            {' '}({predictions.model_info.input_size}×{predictions.model_info.input_size})
-                            {predictions.model_info.type === 'advanced' && ' • 90%+ accuracy'}
-                            {predictions.model_info.type === 'improved' && ' • 80-90% accuracy'}
+                            {predictions.model_info.type === 'mobilenetv2_h5' ? (
+                              <>🎯 Analyzed with YOUR CUSTOM MOBILENETV2 H5 model (Transfer Learning, 224x224)</>
+                            ) : predictions.model_info.type === 'mobilenetv2_final' ? (
+                              <>🎯 Analyzed with YOUR CUSTOM MOBILENETV2 model (Transfer Learning, 224x224)</>
+                            ) : predictions.model_info.type === 'mobilenetv2_checkpoint' ? (
+                              <>🎯 Analyzed with MOBILENETV2 CHECKPOINT model (224x224)</>
+                            ) : predictions.model_info.type === 'mobilenetv2_v1' ? (
+                              <>🎯 Analyzed with MOBILENETV2 V1 model (224x224)</>
+                            ) : (
+                              <>🎯 Analyzed with {predictions.model_info.type.toUpperCase()} model</>
+                            )}
                           </p>
                         </div>
                       )}
 
-                      {/* Save confirmation */}
                       {predictions.scan_id && (
                         <div className="bg-green-50 border-2 border-green-200 rounded-xl p-3 text-center">
                           <p className="text-sm text-green-800 font-medium">
@@ -613,6 +791,14 @@ const DogScanner = ({ user, setUser }) => {
                         <p className="text-white/90">
                           {predictions.recommendation}
                         </p>
+                        
+                        {predictions.warning && (
+                          <div className="mt-3 bg-white/20 rounded-lg p-3">
+                            <p className="text-sm text-white font-medium">
+                              ⚠️ {predictions.warning}
+                            </p>
+                          </div>
+                        )}
                       </div>
 
                       <div className="bg-gradient-to-r from-purple-50 to-indigo-50 rounded-2xl p-6 shadow-lg">
@@ -647,7 +833,22 @@ const DogScanner = ({ user, setUser }) => {
                             ></div>
                           </div>
 
-                          {!predictions.is_healthy && (
+                          {/* SYMPTOMS */}
+                          {predictions.top_prediction.symptoms && predictions.top_prediction.symptoms.length > 0 && (
+                            <div className="mt-4 bg-white rounded-xl p-4">
+                              <p className="font-semibold text-gray-800 mb-2 flex items-center gap-2">
+                                <span>🔍</span> Common Symptoms:
+                              </p>
+                              <ul className="text-gray-700 text-sm space-y-1 ml-6">
+                                {predictions.top_prediction.symptoms.map((symptom, idx) => (
+                                  <li key={idx} className="list-disc">{symptom}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                          {/* TREATMENT */}
+                          {!predictions.is_healthy && predictions.top_prediction.treatment && (
                             <div className="mt-4 bg-white rounded-xl p-4">
                               <p className="font-semibold text-gray-800 mb-2 flex items-center gap-2">
                                 <span>💊</span> Recommended Treatment:
@@ -655,6 +856,28 @@ const DogScanner = ({ user, setUser }) => {
                               <p className="text-gray-700 text-sm">
                                 {predictions.top_prediction.treatment}
                               </p>
+                            </div>
+                          )}
+
+                          {/* URGENCY & CONTAGIOUS INFO */}
+                          {!predictions.is_healthy && (
+                            <div className="mt-4 grid grid-cols-2 gap-3">
+                              {predictions.top_prediction.urgency && (
+                                <div className="bg-white rounded-xl p-3">
+                                  <p className="text-xs text-gray-600 mb-1">Urgency Level</p>
+                                  <p className={`text-sm font-bold ${getUrgencyColor(predictions.top_prediction.urgency)}`}>
+                                    {predictions.top_prediction.urgency}
+                                  </p>
+                                </div>
+                              )}
+                              {predictions.top_prediction.contagious !== undefined && (
+                                <div className="bg-white rounded-xl p-3">
+                                  <p className="text-xs text-gray-600 mb-1">Contagious</p>
+                                  <p className={`text-sm font-bold ${predictions.top_prediction.contagious ? 'text-red-600' : 'text-green-600'}`}>
+                                    {predictions.top_prediction.contagious ? '⚠️ Yes' : '✅ No'}
+                                  </p>
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
@@ -692,13 +915,12 @@ const DogScanner = ({ user, setUser }) => {
 
                       <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded-lg">
                         <p className="text-sm text-yellow-800">
-                          <span className="font-semibold">⚠️ Important:</span> This is an AI-powered analysis and should not replace professional veterinary diagnosis. Always consult a qualified veterinarian for accurate diagnosis and treatment.
+                          <span className="font-semibold">⚠️ Important:</span> This is an AI-powered analysis and should not replace professional veterinary diagnosis.
                         </p>
                       </div>
                     </div>
                   )}
 
-                  {/* Reset Button */}
                   <button
                     onClick={reset}
                     className="w-full bg-white border-2 border-purple-600 text-purple-600 
@@ -712,27 +934,22 @@ const DogScanner = ({ user, setUser }) => {
               )}
             </div>
 
-            {/* Footer Info */}
             <div className="text-center mt-8 text-gray-600">
               <p className="text-sm">
                 {scanMode === 'breed' 
-                  ? `Powered by TensorFlow & MobileNetV2 • ${modelInfo?.numBreeds || 121} Dog Breeds Supported`
-                  : modelInfo?.diseaseModelType === 'advanced'
-                    ? `Powered by TensorFlow & EfficientNetB3 • ${modelInfo?.numDiseases || 6} Disease Categories • 90%+ Accuracy`
-                    : modelInfo?.diseaseModelType === 'improved'
-                      ? `Powered by TensorFlow & EfficientNetV2-B2 • ${modelInfo?.numDiseases || 6} Disease Categories • 80-90% Accuracy`
-                      : `Powered by TensorFlow • ${modelInfo?.numDiseases || 6} Disease Categories Supported`
+                  ? `Powered by TensorFlow • ${modelInfo?.numBreeds || 121} Breeds • ${modelInfo?.numEmotions || 4} Emotions`
+                  : modelInfo?.diseaseModelType === 'mobilenetv2_h5'
+                    ? `Powered by MobileNetV2 H5 • Your Custom Model • ${modelInfo?.numDiseases || 6} Diseases • Transfer Learning`
+                    : modelInfo?.diseaseModelType === 'mobilenetv2_final'
+                      ? `Powered by MobileNetV2 • Your Custom Model • ${modelInfo?.numDiseases || 6} Diseases • Transfer Learning`
+                      : `Powered by TensorFlow • ${modelInfo?.numDiseases || 6} Disease Categories`
                 }
               </p>
               <p className="text-xs text-gray-500 mt-1">
-                KB5074109 Compatible Mode Active • Database Integration Enabled • Keras 3 Compatible
-                {modelInfo && (modelInfo.diseaseModelType === 'improved' || modelInfo.diseaseModelType === 'advanced') && scanMode === 'disease' && (
-                  <span className={`font-semibold ${
-                    modelInfo.diseaseModelType === 'advanced' ? 'text-blue-600' : 'text-green-600'
-                  }`}>
-                    {' '}• Using {modelInfo.diseaseModelType === 'advanced' ? 'Advanced' : 'Improved'} AI Model
-                  </span>
-                )}
+                {modelInfo?.diseaseModelType && scanMode === 'disease'
+                  ? 'Advanced AI Detection • Database Enabled • Comprehensive Disease Info'
+                  : 'Advanced AI Detection • Database Enabled • Keras 3 Compatible'
+                }
               </p>
             </div>
           </div>
@@ -742,4 +959,4 @@ const DogScanner = ({ user, setUser }) => {
   );
 };
 
-export default DogScanner;  
+export default DogScanner;
