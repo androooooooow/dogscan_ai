@@ -24,7 +24,6 @@ router.post("/register", async (req, res) => {
             });
         }
 
-        // Check if email exists
         const userExists = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
         if (userExists.rows.length > 0) {
             return res.status(400).json({ 
@@ -33,19 +32,15 @@ router.post("/register", async (req, res) => {
             });
         }
 
-        // Hash password
         const hashedPassword = await bcrypt.hash(password, 10);
         
-        // Create user
         const newUser = await pool.query(
             'INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING id, name, email',
             [name, email, hashedPassword]
         );
 
-        // Generate token
         const token = generateToken(newUser.rows[0].id);
 
-        // Return token in response AND set cookie
         res.cookie("token", token, {
             httpOnly: true,
             secure: process.env.NODE_ENV === "production",
@@ -103,10 +98,8 @@ router.post("/login", async (req, res) => {
             });
         }
 
-        // Generate token
         const token = generateToken(userData.id);
         
-        // Set cookie for web clients
         res.cookie("token", token, {
             httpOnly: true,
             secure: process.env.NODE_ENV === "production",
@@ -114,7 +107,6 @@ router.post("/login", async (req, res) => {
             maxAge: 30 * 24 * 60 * 60 * 1000 
         });
 
-        // Return token for Android
         res.json({ 
             success: true,
             message: "Login successful",
@@ -142,6 +134,38 @@ router.get('/me', protect, async (req, res) => {
     });
 });
 
+// 🆕 ✅ Update user profile (ITO ANG DINAGDAG NATIN)
+router.post("/update-profile", protect, async (req, res) => {
+    try {
+        const { name, email } = req.body;
+        const userId = req.user.id; // Galing sa 'protect' middleware
+
+        const updatedUser = await pool.query(
+            'UPDATE users SET name = $1, email = $2 WHERE id = $3 RETURNING id, name, email',
+            [name, email, userId]
+        );
+
+        if (updatedUser.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found"
+            });
+        }
+
+        res.json({
+            success: true,
+            message: "Profile updated successfully",
+            user: updatedUser.rows[0]
+        });
+    } catch (error) {
+        console.error("Update profile error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Server error during profile update"
+        });
+    }
+});
+
 // ✅ Logout user
 router.post('/logout', (req, res) => {
     res.cookie('token', '', { 
@@ -149,7 +173,7 @@ router.post('/logout', (req, res) => {
         expires: new Date(0) 
     });
     res.json({ 
-        success: true,
+        success: true, 
         message: 'Logged out successfully' 
     });
 });
