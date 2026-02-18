@@ -7,6 +7,7 @@ import SignIn       from './page/SignIn.jsx';
 import SignUp       from './page/SignUp.jsx';
 import Dashboard    from './page/Dashboard.jsx';
 import DogBreeds    from './page/DogBreeds.jsx';
+import DogSkinDisease from './page/DogSkinDisease.jsx';
 import DogScanner   from './page/DogScanner.jsx';
 
 const AppRoutes = () => {
@@ -24,6 +25,7 @@ const AppRoutes = () => {
       {/* PROTECTED — redirect if not logged in */}
       <Route path="/dashboard"  element={user ? <Dashboard  user={user} /> : <Navigate to="/signin" replace />} />
       <Route path="/dogbreeds"  element={user ? <DogBreeds  user={user} /> : <Navigate to="/signin" replace />} />
+      <Route path="/dogskindisease"  element={user ? <DogSkinDisease  user={user} /> : <Navigate to="/signin" replace />} />
       <Route path="/dogscanner" element={user ? <DogScanner user={user} /> : <Navigate to="/signin" replace />} />
 
       {/* FALLBACK */}

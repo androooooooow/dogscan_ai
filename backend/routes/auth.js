@@ -133,24 +133,29 @@ router.get('/me', protect, async (req, res) => {
         user: req.user
     });
 });
-
-// 🆕 ✅ Update user profile (ITO ANG DINAGDAG NATIN)
+// ✅ Update user profile 
 router.post("/update-profile", protect, async (req, res) => {
     try {
-        const { name, email } = req.body;
-        const userId = req.user.id; // Galing sa 'protect' middleware
+        const { name, email, password } = req.body;
+        const userId = req.user.id;
+
+        // 1. Get current user to check password
+        const userResult = await pool.query('SELECT password FROM users WHERE id = $1', [userId]);
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "User not found" });
+        }
+
+        let finalPassword = userResult.rows[0].password;
+
+        // 2. Only hash if the password is new/provided
+        if (password && password !== finalPassword) {
+            finalPassword = await bcrypt.hash(password, 10);
+        }
 
         const updatedUser = await pool.query(
-            'UPDATE users SET name = $1, email = $2 WHERE id = $3 RETURNING id, name, email',
-            [name, email, userId]
+            'UPDATE users SET name = $1, email = $2, password = $3 WHERE id = $4 RETURNING id, name, email',
+            [name, email, finalPassword, userId]
         );
-
-        if (updatedUser.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "User not found"
-            });
-        }
 
         res.json({
             success: true,
@@ -159,10 +164,7 @@ router.post("/update-profile", protect, async (req, res) => {
         });
     } catch (error) {
         console.error("Update profile error:", error);
-        res.status(500).json({
-            success: false,
-            message: "Server error during profile update"
-        });
+        res.status(500).json({ success: false, message: "Server error" });
     }
 });
 

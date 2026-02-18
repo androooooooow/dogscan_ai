@@ -1,5 +1,5 @@
 import { useNavigate, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Dog, Scan, Settings } from 'lucide-react';
+import { LayoutDashboard, Dog, Scan, Users, History, MessageSquare  } from 'lucide-react';
 
 function Sidebar({ sidebarOpen }) {
     const navigate = useNavigate();
@@ -7,9 +7,17 @@ function Sidebar({ sidebarOpen }) {
 
     const menuItems = [
         { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, path: '/dashboard' },
+        { id: 'community', label: 'Community', icon: Users, path: '/community' },
+
+
         { id: 'dogbreeds', label: 'Dog Breeds', icon: Dog, path: '/dogbreeds' },
+        { id: 'dogskindisease', label: 'Dog Skin Disease', icon: Dog, path: '/dogskindisease' },
+
         { id: 'dogscanner', label: 'Dog Scanner', icon: Scan, path: '/dogscanner' },
-        { id: 'settings', label: 'Settings', icon: Settings, path: '/settings' },
+        { id: 'history', label: 'History', icon: History, path: '/history' },
+        { id: 'feedback', label: 'Feedback', icon: MessageSquare, path: '/feedback' },
+        
+       
     ];
 
     const currentPath = location.pathname;
